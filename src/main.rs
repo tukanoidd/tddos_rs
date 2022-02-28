@@ -155,7 +155,7 @@ fn load_websites_configs() -> Result<Vec<WebsiteConfig>> {
     info!("Loading websites configs...");
 
     let mut configs = vec![];
-    let websites_file = File::open("webistes")?;
+    let websites_file = File::open("../websites")?;
     let websites = BufReader::new(websites_file).lines();
 
     for website in websites.flatten() {
