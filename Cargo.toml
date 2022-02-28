@@ -1,0 +1,20 @@
+[package]
+name = "tddos_rs"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.17.0", features = ["rt-multi-thread", "macros"] }
+futures = "0.3.21"
+
+anyhow = "1.0.55"
+pretty_env_logger = "0.4.0"
+log = "0.4.14"
+
+dns-lookup = "1.0.8"
+portpicker = "0.1.1"
+local-ip-address = "0.4.4"
+
+rand = "0.8.5"
