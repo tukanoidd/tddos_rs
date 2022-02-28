@@ -23,18 +23,18 @@ struct Config {
     execution_time: u64,
     timeout: Duration,
     packet_size: usize,
-    default_port: String,
+    default_ports: Vec<String>,
 }
 
 impl Display for Config {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Config {{ execution_time: {}s, timeout: {}ms, packet_size: {} bytes, default_port: {} }}",
+            "Config {{ execution_time: {}s, timeout: {}ms, packet_size: {} bytes, default_ports: [{}] }}",
             self.execution_time,
             self.timeout.as_millis(),
             self.packet_size,
-            self.default_port
+            self.default_ports.join(", ")
         )
     }
 }
@@ -52,8 +52,7 @@ async fn load_config() -> Result<Config> {
     // Default packet size - 65000 bytes
     let mut packet_size = 65000;
 
-    // Default port - 80
-    let mut default_port = "80".to_string();
+    let mut default_ports = vec![];
 
     for config_line in config_lines.flatten() {
         if config_line.is_empty() {
@@ -79,7 +78,10 @@ async fn load_config() -> Result<Config> {
                         packet_size = p_size.parse()?;
                     }
                 }
-                "default_port" => {
+                "default_ports" => {
+                    while let Some(port) = split.next() {
+                        default_ports.push(port);
+                    }
                     if let Some(p) = split.next() {
                         default_port = p.to_string();
                     }
@@ -89,11 +91,16 @@ async fn load_config() -> Result<Config> {
         }
     }
 
+    // Default port if not set - 80
+    if default_ports.len() == 0 {
+        default_ports.push("80");
+    }
+
     let config = Config {
         execution_time,
         timeout: Duration::from_millis(timeout),
         packet_size,
-        default_port,
+        default_ports: default_ports.iter().map(|port| port.to_string()).collect(),
     };
 
     info!("Loaded config: {}", config);
@@ -167,7 +174,7 @@ fn load_websites_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
                         }
 
                         if ports.len() == 0 {
-                            ports.push(config.default_port.clone());
+                            ports = config.default_ports.clone();
                         }
 
                         for port in ports.iter() {
@@ -189,7 +196,7 @@ fn load_websites_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
                         }
 
                         if ports.len() == 0 {
-                            ports.push(config.default_port.clone());
+                            ports = config.default_ports.clone();
                         }
 
                         for port in ports.iter() {

@@ -7,7 +7,7 @@ Config ("config" file): </br>
 execution_time {seconds} </br>
 timeout {milliseconds} (time for the thread t sleep between each attack) </br>
 packet_size {bytes} </br>
-default_port {number} (default port if none included) </br>
+default_ports {number, ...} (default port(s) (at least 1) if none included) </br>
 
 Websites ("webistes" file): </br>
 If ip address: </br>
