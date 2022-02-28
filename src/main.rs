@@ -80,10 +80,7 @@ async fn load_config() -> Result<Config> {
                 }
                 "default_ports" => {
                     while let Some(port) = split.next() {
-                        default_ports.push(port);
-                    }
-                    if let Some(p) = split.next() {
-                        default_port = p.to_string();
+                        default_ports.push(port.to_string());
                     }
                 }
                 _ => {}
@@ -93,14 +90,14 @@ async fn load_config() -> Result<Config> {
 
     // Default port if not set - 80
     if default_ports.len() == 0 {
-        default_ports.push("80");
+        default_ports.push("80".to_string());
     }
 
     let config = Config {
         execution_time,
         timeout: Duration::from_millis(timeout),
         packet_size,
-        default_ports: default_ports.iter().map(|port| port.to_string()).collect(),
+        default_ports,
     };
 
     info!("Loaded config: {}", config);
