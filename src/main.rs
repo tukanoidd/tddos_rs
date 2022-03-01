@@ -301,7 +301,7 @@ fn generate_buffer(size: usize) -> Vec<u8> {
 fn main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
-    pretty_env_logger::init();
+    pretty_env_logger::init_timed();
 
     let config = load_config()?;
     let website_configs = load_websites_configs(&config)?;
