@@ -1,7 +1,9 @@
 To run from project: </br>
 Install Rust and Cargo with rustup </br>
 Set all configs in files below </br>
-Run "cargo run" 
+Run "cargo run"
+
+Both configuration lines support comments (but checks at the start of the line for now) with "//"
 
 Config ("config" file): </br>
 execution_time {seconds} (default 60) </br>

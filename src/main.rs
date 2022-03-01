@@ -70,7 +70,7 @@ fn load_config() -> Result<Config> {
     let mut summary = true;
 
     for config_line in config_lines.flatten() {
-        if config_line.is_empty() {
+        if config_line.is_empty() || config_line.trim().starts_with("//") {
             continue;
         }
 
@@ -177,7 +177,7 @@ fn load_websites_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
         .collect::<Vec<_>>()
         .par_iter()
         .for_each(|website| {
-            if website.is_empty() {
+            if website.is_empty() || website.trim().starts_with("//") {
                 return;
             }
 
