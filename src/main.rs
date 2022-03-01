@@ -3,7 +3,6 @@ extern crate log;
 
 extern crate pretty_env_logger;
 
-use std::future::Future;
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
@@ -382,7 +381,7 @@ fn main() -> Result<()> {
 
     pretty_env_logger::init_timed();
 
-    if check(None).is_err() {
+    if let Err(error) = check(None) {
         error!(
             "Connectivity Issues! Check your internet connection!\nError message: {}",
             error
