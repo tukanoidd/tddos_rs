@@ -3,6 +3,7 @@ extern crate log;
 
 extern crate pretty_env_logger;
 
+use std::future::Future;
 use std::{
     collections::HashMap,
     fmt::{Debug, Display, Formatter},
@@ -17,6 +18,7 @@ use std::{
 use anyhow::*;
 use dns_lookup::lookup_host;
 use lazy_static::lazy_static;
+use online::sync::check;
 use portpicker::pick_unused_port;
 use rand::{thread_rng, RngCore};
 use rayon::prelude::*;
@@ -379,6 +381,15 @@ fn main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
     pretty_env_logger::init_timed();
+
+    if check(None).is_err() {
+        error!(
+            "Connectivity Issues! Check your internet connection!\nError message: {}",
+            error
+        );
+
+        return Ok(());
+    }
 
     let config = load_config()?;
     let website_configs = load_websites_configs(&config)?;
