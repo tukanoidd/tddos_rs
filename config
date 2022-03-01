@@ -2,3 +2,4 @@ execution_time 7200
 timeout 10
 packet_size 65000
 default_port 80
+unreachable_stop_trying true

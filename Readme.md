@@ -4,10 +4,11 @@ Set all configs in files below </br>
 Run "cargo run" 
 
 Config ("config" file): </br>
-execution_time {seconds} </br>
-timeout {milliseconds} (time for the thread t sleep between each attack) </br>
-packet_size {bytes} </br>
-default_ports {number, ...} (default port(s) (at least 1) if none included) </br>
+execution_time {seconds} (default 60) </br>
+timeout {milliseconds} (time for the thread t sleep between each attack) (default 10) </br>
+packet_size {bytes} (default 65000) </br>
+default_ports {number, ...} (default port(s) (at least 1) if none included) (mandatory) </br>
+unreachable_stop_trying {true/false} (case insensitive) (default true)
 
 Websites ("webistes" file): </br>
 If ip address: </br>

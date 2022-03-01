@@ -26,6 +26,7 @@ struct Config {
     timeout: Duration,
     packet_size: usize,
     default_ports: Vec<String>,
+    unreachable_stop_trying: bool,
 }
 
 impl Display for Config {
@@ -56,6 +57,9 @@ fn load_config() -> Result<Config> {
 
     let mut default_ports = vec![];
 
+    // Default for stop trying to attack unreachable anymore websites - true
+    let mut unreachable_stop_trying = true;
+
     for config_line in config_lines.flatten() {
         if config_line.is_empty() {
             continue;
@@ -85,6 +89,15 @@ fn load_config() -> Result<Config> {
                         default_ports.push(port.to_string());
                     }
                 }
+                "unreachable_stop_trying" => {
+                    if let Some(u_s_t) = split.next() {
+                        unreachable_stop_trying = match u_s_t.to_lowercase().as_str() {
+                            "true" => true,
+                            "false" => false,
+                            _ => true,
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -100,6 +113,7 @@ fn load_config() -> Result<Config> {
         timeout: Duration::from_millis(timeout),
         packet_size,
         default_ports,
+        unreachable_stop_trying,
     };
 
     info!("Loaded config: {}", config);
@@ -266,6 +280,10 @@ fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Resul
                                         "Failed to send a packet to {} .\nError message: {}",
                                         socket_address, error
                                     );
+
+                                    if config.unreachable_stop_trying {
+                                        break;
+                                    }
                                 }
                             }
 
