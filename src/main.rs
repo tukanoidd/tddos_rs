@@ -385,12 +385,22 @@ lazy_static! {
 
 fn show_summary() {
     info!("~~~~~~~ Attack Summary START ~~~~~~~");
+    let mut sum_packets = 0;
+    let mut sum_packet_size = 0;
+
     for (socket_address, packet_summary) in (*SUMMARY).lock().unwrap().iter() {
+        sum_packets += packet_summary.amount;
+        sum_packet_size += packet_summary.size;
+
         info!(
             "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {} bytes",
             socket_address, packet_summary.amount, packet_summary.size
         );
     }
+    info!(
+        "Sum Packets Sent: {}, Sum Packets Size: {}",
+        sum_packets, sum_packet_size
+    );
     info!("~~~~~~~ Attack Summary END ~~~~~~~");
 }
 // ----- Attack Summary END -----
