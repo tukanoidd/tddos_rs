@@ -4,3 +4,5 @@ packet_size 65000
 default_port 80
 unreachable_stop_trying true
 summary true
+default_attack_methods udp
+tcp_connection_timeout 5

