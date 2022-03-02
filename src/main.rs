@@ -393,15 +393,37 @@ fn show_summary() {
         sum_packet_size += packet_summary.size;
 
         info!(
-            "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {} bytes",
-            socket_address, packet_summary.amount, packet_summary.size
+            "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {}B",
+            socket_address,
+            packet_summary.amount,
+            packet_size_convert(packet_summary.size)
         );
     }
+
     info!(
         "Sum Packets Sent: {}, Sum Packets Size: {}",
-        sum_packets, sum_packet_size
+        sum_packets,
+        packet_size_convert(sum_packet_size)
     );
     info!("~~~~~~~ Attack Summary END ~~~~~~~");
+}
+
+fn packet_size_convert(size: u128) -> String {
+    let mut output = format!("{}B", size);
+
+    let mut size = size as f64 / 1000.0;
+    if size >= 1.0 {
+        output += &format!(" ({}MiB", size);
+
+        size /= 1000.0;
+        if size >= 1.0 {
+            output += &format!(", {}GiB", size);
+        }
+
+        output += ")";
+    }
+
+    output
 }
 // ----- Attack Summary END -----
 
