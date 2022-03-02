@@ -19,3 +19,5 @@ online = { version = "3.0.1", features = ["sync"] }
 
 rand = "0.8.5"
 lazy_static = "1.4.0"
+
+itertools = "0.10.3"

