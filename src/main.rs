@@ -33,6 +33,102 @@ struct Config {
     summary: bool,
 }
 
+impl Config {
+    pub fn load() -> Result<Self> {
+        info!("Loading Main Config File...");
+
+        let config_file = File::open("config")?;
+        let config_lines = BufReader::new(config_file).lines();
+
+        // Default execution time - a minute
+        let mut execution_time = 60;
+
+        // Default timeout - 10ms
+        let mut timeout = 10;
+
+        // Default packet size - 65000 bytes
+        let mut packet_size = 65000;
+
+        let mut default_ports = vec![];
+
+        // Default for stop trying to attack unreachable anymore websites - true
+        let mut unreachable_stop_trying = true;
+
+        // Default for showing summary - true
+        let mut summary = true;
+
+        for config_line in config_lines.flatten() {
+            if config_line.is_empty() || config_line.trim().starts_with("//") {
+                continue;
+            }
+
+            let mut split = config_line.split(' ');
+
+            if let Some(first) = split.next() {
+                match first {
+                    "execution_time" => {
+                        if let Some(ex_time) = split.next() {
+                            execution_time = ex_time.parse()?;
+                        }
+                    }
+                    "timeout" => {
+                        if let Some(t_out) = split.next() {
+                            timeout = t_out.parse()?;
+                        }
+                    }
+                    "packet_size" => {
+                        if let Some(p_size) = split.next() {
+                            packet_size = p_size.parse()?;
+                        }
+                    }
+                    "default_ports" => {
+                        while let Some(port) = split.next() {
+                            default_ports.push(port.to_string());
+                        }
+                    }
+                    "unreachable_stop_trying" => {
+                        if let Some(u_s_t) = split.next() {
+                            unreachable_stop_trying = match u_s_t.to_lowercase().as_str() {
+                                "true" => true,
+                                "false" => false,
+                                _ => true,
+                            }
+                        }
+                    }
+                    "summary" => {
+                        if let Some(sum) = split.next() {
+                            summary = match sum.to_lowercase().as_str() {
+                                "true" => true,
+                                "false" => false,
+                                _ => true,
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Default port if not set - 80
+        if default_ports.len() == 0 {
+            default_ports.push("80".to_string());
+        }
+
+        let config = Config {
+            execution_time,
+            timeout: Duration::from_millis(timeout),
+            packet_size,
+            default_ports,
+            unreachable_stop_trying,
+            summary,
+        };
+
+        info!("Loaded config: {}", config);
+
+        Ok(config)
+    }
+}
+
 impl Display for Config {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
@@ -47,98 +143,6 @@ impl Display for Config {
         )
     }
 }
-
-fn load_config() -> Result<Config> {
-    let config_file = File::open("config")?;
-    let config_lines = BufReader::new(config_file).lines();
-
-    // Default execution time - a minute
-    let mut execution_time = 60;
-
-    // Default timeout - 10ms
-    let mut timeout = 10;
-
-    // Default packet size - 65000 bytes
-    let mut packet_size = 65000;
-
-    let mut default_ports = vec![];
-
-    // Default for stop trying to attack unreachable anymore websites - true
-    let mut unreachable_stop_trying = true;
-
-    // Default for showing summary - true
-    let mut summary = true;
-
-    for config_line in config_lines.flatten() {
-        if config_line.is_empty() || config_line.trim().starts_with("//") {
-            continue;
-        }
-
-        let mut split = config_line.split(' ');
-
-        if let Some(first) = split.next() {
-            match first {
-                "execution_time" => {
-                    if let Some(ex_time) = split.next() {
-                        execution_time = ex_time.parse()?;
-                    }
-                }
-                "timeout" => {
-                    if let Some(t_out) = split.next() {
-                        timeout = t_out.parse()?;
-                    }
-                }
-                "packet_size" => {
-                    if let Some(p_size) = split.next() {
-                        packet_size = p_size.parse()?;
-                    }
-                }
-                "default_ports" => {
-                    while let Some(port) = split.next() {
-                        default_ports.push(port.to_string());
-                    }
-                }
-                "unreachable_stop_trying" => {
-                    if let Some(u_s_t) = split.next() {
-                        unreachable_stop_trying = match u_s_t.to_lowercase().as_str() {
-                            "true" => true,
-                            "false" => false,
-                            _ => true,
-                        }
-                    }
-                }
-                "summary" => {
-                    if let Some(sum) = split.next() {
-                        summary = match sum.to_lowercase().as_str() {
-                            "true" => true,
-                            "false" => false,
-                            _ => true,
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-    }
-
-    // Default port if not set - 80
-    if default_ports.len() == 0 {
-        default_ports.push("80".to_string());
-    }
-
-    let config = Config {
-        execution_time,
-        timeout: Duration::from_millis(timeout),
-        packet_size,
-        default_ports,
-        unreachable_stop_trying,
-        summary,
-    };
-
-    info!("Loaded config: {}", config);
-
-    Ok(config)
-}
 // ----- Attack Config END -----
 
 // ----- Website Configuration START -----
@@ -147,6 +151,77 @@ struct WebsiteConfig {
     pub address: String,
     pub ports: Vec<String>,
     pub is_domain: bool,
+}
+
+impl WebsiteConfig {
+    pub fn load_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
+        info!("Loading websites configs...");
+
+        let configs = Arc::new(Mutex::new(vec![]));
+        let websites_file = File::open("websites")?;
+        let websites = BufReader::new(websites_file).lines();
+
+        websites
+            .flatten()
+            .collect::<Vec<_>>()
+            .par_iter()
+            .for_each(|website| match Self::load(website, config) {
+                None => return,
+                Some(website_config) => (*configs).lock().unwrap().push(website_config),
+            });
+
+        info!("All websites loaded!\n{:?}", configs);
+
+        let res = Ok(configs.lock().unwrap().clone());
+        res
+    }
+
+    fn load(website: &str, config: &Config) -> Option<WebsiteConfig> {
+        if website.is_empty() || website.trim().starts_with("//") {
+            return None;
+        }
+
+        let mut split = website.split(' ');
+
+        if let Some(first) = split.next() {
+            let is_domain = match first {
+                "ip" => false,
+                "domain" => true,
+                _ => false,
+            };
+
+            if let Some(address) = split.next() {
+                let mut ports = vec![];
+
+                while let Some(port) = split.next() {
+                    ports.push(port.to_string());
+                }
+
+                if ports.len() == 0 {
+                    ports = config.default_ports.clone();
+                }
+
+                for port in ports.iter() {
+                    info!(
+                        "Found {} {} with port {}",
+                        if is_domain { "domain" } else { "ip" },
+                        address,
+                        port
+                    );
+                }
+
+                return Some(WebsiteConfig {
+                    address: address.to_string(),
+                    ports,
+                    is_domain,
+                });
+            }
+
+            return None;
+        }
+
+        return None;
+    }
 }
 
 impl Debug for WebsiteConfig {
@@ -163,66 +238,6 @@ impl Debug for WebsiteConfig {
                 .join(", ")
         )
     }
-}
-
-fn load_websites_configs(config: &Config) -> Result<Vec<WebsiteConfig>> {
-    info!("Loading websites configs...");
-
-    let configs = Arc::new(Mutex::new(vec![]));
-    let websites_file = File::open("websites")?;
-    let websites = BufReader::new(websites_file).lines();
-
-    websites
-        .flatten()
-        .collect::<Vec<_>>()
-        .par_iter()
-        .for_each(|website| {
-            if website.is_empty() || website.trim().starts_with("//") {
-                return;
-            }
-
-            let mut split = website.split(' ');
-
-            if let Some(first) = split.next() {
-                let is_domain = match first {
-                    "ip" => false,
-                    "domain" => true,
-                    _ => false,
-                };
-
-                if let Some(address) = split.next() {
-                    let mut ports = vec![];
-
-                    while let Some(port) = split.next() {
-                        ports.push(port.to_string());
-                    }
-
-                    if ports.len() == 0 {
-                        ports = config.default_ports.clone();
-                    }
-
-                    for port in ports.iter() {
-                        info!(
-                            "Found {} {} with port {}",
-                            if is_domain { "domain" } else { "ip" },
-                            address,
-                            port
-                        );
-                    }
-
-                    (*configs).lock().unwrap().push(WebsiteConfig {
-                        address: address.to_string(),
-                        ports,
-                        is_domain,
-                    })
-                }
-            }
-        });
-
-    info!("All websites loaded!\n{:?}", configs);
-
-    let res = Ok(configs.lock().unwrap().clone());
-    res
 }
 // ----- Website Configuration END -----
 
@@ -390,8 +405,8 @@ fn main() -> Result<()> {
         return Ok(());
     }
 
-    let config = load_config()?;
-    let website_configs = load_websites_configs(&config)?;
+    let config = Config::load()?;
+    let website_configs = WebsiteConfig::load_configs(&config)?;
 
     attack_websites(config.clone(), website_configs)?;
 
