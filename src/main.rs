@@ -4,7 +4,6 @@ extern crate log;
 extern crate pretty_env_logger;
 
 use std::{
-    collections::HashMap,
     fmt::{Debug, Display, Formatter},
     fs::File,
     io::{BufRead, BufReader},
@@ -298,14 +297,26 @@ fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Resul
 
         let socket = UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
 
+        let mut summary_added = false;
+
         while start.elapsed().as_secs() < config.execution_time {
             match socket.connect(socket_address.clone()) {
                 std::result::Result::Ok(_) => {
-                    if config.summary {
-                        (*SUMMARY)
-                            .lock()
-                            .unwrap()
-                            .insert(socket_address.clone(), PacketSummary::default());
+                    if config.summary && !summary_added {
+                        summary_added = true;
+
+                        let mut summary = (*SUMMARY).lock().unwrap();
+
+                        if summary
+                            .iter()
+                            .position(|s| &s.socket_address == socket_address)
+                            .is_none()
+                        {
+                            summary.push(PacketSummary {
+                                socket_address: socket_address.clone(),
+                                ..Default::default()
+                            })
+                        }
                     }
 
                     let buffer = generate_buffer(config.packet_size);
@@ -321,11 +332,14 @@ fn attack_websites(config: Config, website_configs: Vec<WebsiteConfig>) -> Resul
                                 );
 
                                 if config.summary {
-                                    if let Some(packet_summary) =
-                                        (*SUMMARY).lock().unwrap().get_mut(socket_address)
+                                    let mut summary = (*SUMMARY).lock().unwrap();
+
+                                    if let Some(index) = summary
+                                        .iter()
+                                        .position(|s| &s.socket_address == socket_address)
                                     {
-                                        packet_summary.size += size as u128;
-                                        packet_summary.amount += 1;
+                                        summary[index].size += size as u128;
+                                        summary[index].amount += 1;
                                     }
                                 }
                             }
@@ -372,58 +386,64 @@ fn generate_buffer(size: usize) -> Vec<u8> {
 // ----- Attack Websites END -----
 
 // ----- Attack Summary START -----
-#[derive(Default)]
+#[derive(Default, Clone)]
 struct PacketSummary {
+    socket_address: String,
     amount: u128,
     size: u128,
 }
 
-lazy_static! {
-    static ref SUMMARY: Arc<Mutex<HashMap<String, PacketSummary>>> =
-        Arc::new(Mutex::new(HashMap::new()));
-}
+impl PacketSummary {
+    pub fn show_summary(summary: Vec<PacketSummary>) {
+        info!("~~~~~~~ Attack Summary START ~~~~~~~");
+        let mut sum_packets = 0;
+        let mut sum_packet_size = 0;
 
-fn show_summary() {
-    info!("~~~~~~~ Attack Summary START ~~~~~~~");
-    let mut sum_packets = 0;
-    let mut sum_packet_size = 0;
+        for packet_summary in summary {
+            sum_packets += packet_summary.amount;
+            sum_packet_size += packet_summary.size;
 
-    for (socket_address, packet_summary) in (*SUMMARY).lock().unwrap().iter() {
-        sum_packets += packet_summary.amount;
-        sum_packet_size += packet_summary.size;
+            packet_summary.show();
+        }
 
         info!(
+            "Sum Packets Sent: {}, Sum Packets Size: {}",
+            sum_packets,
+            Self::packet_size_output(sum_packet_size)
+        );
+        info!("~~~~~~~ Attack Summary END ~~~~~~~");
+    }
+
+    pub fn show(&self) {
+        info!(
             "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {}B",
-            socket_address,
-            packet_summary.amount,
-            packet_size_convert(packet_summary.size)
+            self.socket_address,
+            self.amount,
+            Self::packet_size_output(self.size)
         );
     }
 
-    info!(
-        "Sum Packets Sent: {}, Sum Packets Size: {}",
-        sum_packets,
-        packet_size_convert(sum_packet_size)
-    );
-    info!("~~~~~~~ Attack Summary END ~~~~~~~");
-}
+    fn packet_size_output(size: u128) -> String {
+        let mut output = format!("{}B", size);
 
-fn packet_size_convert(size: u128) -> String {
-    let mut output = format!("{}B", size);
-
-    let mut size = size as f64 / 1000.0;
-    if size >= 1.0 {
-        output += &format!(" ({}MiB", size);
-
-        size /= 1000.0;
+        let mut size = size as f64 / 1000.0;
         if size >= 1.0 {
-            output += &format!(", {}GiB", size);
+            output += &format!(" ({}MiB", size);
+
+            size /= 1000.0;
+            if size >= 1.0 {
+                output += &format!(", {}GiB", size);
+            }
+
+            output += ")";
         }
 
-        output += ")";
+        output
     }
+}
 
-    output
+lazy_static! {
+    static ref SUMMARY: Arc<Mutex<Vec<PacketSummary>>> = Arc::new(Mutex::new(Vec::new()));
 }
 // ----- Attack Summary END -----
 
@@ -447,7 +467,7 @@ fn main() -> Result<()> {
     attack_websites(config.clone(), website_configs)?;
 
     if config.summary {
-        show_summary();
+        PacketSummary::show_summary((*SUMMARY).lock().unwrap().clone());
     }
 
     Ok(())
