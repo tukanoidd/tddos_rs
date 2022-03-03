@@ -598,14 +598,14 @@ impl Attacker {
     fn add_to_summary(&self, target_address: String, attack_method: AttackMethod) {
         let mut summary = (*self.summary).lock().unwrap();
 
-        if let Some(socket_summary) = summary.get_mut(&target_address) {
-            socket_summary.insert(attack_method, PacketSummary::default());
+        if let Some(target_summary) = summary.get_mut(&target_address) {
+            target_summary.insert(attack_method, PacketSummary::default());
         } else {
             summary.insert(target_address.clone(), {
-                let mut socket_summary = HashMap::new();
-                socket_summary.insert(attack_method, PacketSummary::default());
+                let mut target_summary = HashMap::new();
+                target_summary.insert(attack_method, PacketSummary::default());
 
-                socket_summary
+                target_summary
             });
         }
     }
@@ -642,9 +642,9 @@ impl Attacker {
     fn update_summary(&self, target_address: String, attack_method: AttackMethod, size: u128) {
         if self.config.summary {
             if let Some(summary) = (*self.summary).lock().unwrap().get_mut(&target_address) {
-                if let Some(socket_summary) = summary.get_mut(&attack_method) {
-                    socket_summary.size += size;
-                    socket_summary.amount += 1;
+                if let Some(target_summary) = summary.get_mut(&attack_method) {
+                    target_summary.size += size;
+                    target_summary.amount += 1;
                 }
             }
         }
@@ -655,8 +655,8 @@ impl Attacker {
         let mut sum_packets = 0;
         let mut sum_packet_size = 0;
 
-        for (target_address, socket_summary) in (*self.summary).lock().unwrap().iter() {
-            for (_, packet_summary) in socket_summary.iter() {
+        for (target_address, target_summary) in (*self.summary).lock().unwrap().iter() {
+            for (_, packet_summary) in target_summary.iter() {
                 sum_packets += packet_summary.amount;
                 sum_packet_size += packet_summary.size;
 
