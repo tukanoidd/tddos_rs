@@ -354,7 +354,7 @@ struct PacketSummary {
 impl PacketSummary {
     pub fn show(&self, target_address: &str) {
         info!(
-            "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {}B",
+            "Socket Address: {}, Packets Sent: {}, Sum Packet Size: {}",
             target_address,
             self.amount,
             Self::packet_size_output(self.size)
